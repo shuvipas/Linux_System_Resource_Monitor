@@ -3,8 +3,7 @@
 #include <vector>
 #include <filesystem>
 #include <unistd.h>
-#include <csignal>
-#include <atomic>
+
 #include <unordered_map>
 #include <algorithm>
 #include <set>
@@ -13,8 +12,6 @@
 
 using cpu_ticks = unsigned long long;
 namespace fs = std::filesystem;
-std::atomic<bool> keep_running{true};
-
 struct Process {
     pid_t pid = 0;
     uid_t uid;
@@ -25,16 +22,12 @@ struct Process {
     size_t utime = 0;
     size_t stime = 0;
     size_t last_time = 0;
+  
 };
 
-struct ProcessGroup {
-    std::string group_name;
-    int count = 0;
-    double cpu_percent = 0.0;
-    size_t total_mem_kb = 0;
-    double tot_mem_gb = 0;
-};
 
+// double debug_used_mem_gb=0;
+// double debug_total_cpu_percent = 0.0;
 struct SysInfo{
     size_t total_mem = 0;
     double tot_mem_gb = 0;
@@ -47,16 +40,17 @@ struct SysInfo{
 
     cpu_ticks cpu_prev_tot_time = 0;
     cpu_ticks cpu_prev_idle_time = 0;
-    std::unordered_map<pid_t, cpu_ticks> cpu_prev_process_times;  // Keep pid_t for individual processes
+    std::unordered_map<pid_t, cpu_ticks> cpu_prev_process_times;
     int core_number = 0;
 
-    size_t uid_min = 0;
-    size_t uid_max = 0;
-};
+    size_t uid_min =0;
+    size_t uid_max =0;
 
+
+};
 SysInfo my_system;
 
-
+// Read system-wide total CPU time from /proc/stat
 void readSystemCpuTime(cpu_ticks& curr_tot_time, cpu_ticks& curr_idle_time) {
     std::ifstream stat_file("/proc/stat");
     std::string line;
@@ -76,6 +70,7 @@ void readProcCpuTimes(std::string pid_str, Process& proc) {
     std::string line;
     
     if (std::getline(stat_file, line)) {
+
         std::istringstream iss(line);
         std::string token;
         // Skip first 13 fields
@@ -85,20 +80,20 @@ void readProcCpuTimes(std::string pid_str, Process& proc) {
     }
 }
 
-// Calculate CPU percentage for individual processes
-void calculateCpuPercentages(std::unordered_map<pid_t, Process>& processes) {
-    cpu_ticks curr_tot_time, curr_idle_time;
+// Calculate CPU percentage for all processes
+void calculateCpuPercentages(std::unordered_map<pid_t,Process>& processes) {
+    cpu_ticks curr_tot_time;
+    cpu_ticks curr_idle_time;
     readSystemCpuTime(curr_tot_time, curr_idle_time);
 
-    if (my_system.cpu_prev_tot_time > 0) {
+    if (my_system.cpu_prev_tot_time > 0 && my_system.cpu_prev_idle_time > 0) {
         cpu_ticks total_delta = curr_tot_time - my_system.cpu_prev_tot_time;
         cpu_ticks idle_delta = curr_idle_time - my_system.cpu_prev_idle_time;
-        
+       
         if (total_delta > 0) {
             my_system.total_cpu_percent = 100.0 * (total_delta - idle_delta) / total_delta;
         }
 
-        // Calculate individual process CPU percentages
         for (auto& [pid, proc] : processes) {
             cpu_ticks current_proc_time = proc.utime + proc.stime;
             
@@ -111,48 +106,52 @@ void calculateCpuPercentages(std::unordered_map<pid_t, Process>& processes) {
             }
             my_system.cpu_prev_process_times[pid] = current_proc_time;
         }
-    } else {
+    }  else {
         // First run - just store baseline
         for (auto& [pid, proc] : processes) {
             my_system.cpu_prev_process_times[pid] = proc.utime + proc.stime;
         }
     }
     
+    
     my_system.cpu_prev_tot_time = curr_tot_time;
     my_system.cpu_prev_idle_time = curr_idle_time;
+
 }
 
-bool readProcPid(std::string pid_str, pid_t& pid){
-    pid = 0;
+bool readProcPid(std::string pid_str,pid_t & pid){
+    // Check if directory name is a number (PID)
+    // proc.pid = 0;
     for (char c : pid_str) {
         if (!IS_DIGIT(c)) return false;
-        pid = pid * 10 + (c - '0');
+        pid = pid*10 + (c -'0');
     }
     return true;
 }
-
-void readProcCmd(std::string pid_str, std::string& proc_cmd){
+void readProcCmd(std::string pid_str,Process& proc){
     std::string comm_path = "/proc/" + pid_str + "/comm";
     std::ifstream comm_file(comm_path);
-    if (!std::getline(comm_file, proc_cmd)) {
-        proc_cmd = "unknown";
+    if (! std::getline(comm_file, proc.cmd)) {
+        proc.cmd = "unknown";
     }
 }
 
-uid_t readProcUid(std::string pid_str){
-    uid_t uid = -1;
-    std::string status_path = "/proc/" + pid_str + "/status";
-    std::ifstream status_file(status_path);
-    std::string line;
-    
-    while (std::getline(status_file, line)) {
-        if (line.find("Uid:") == 0) {
-            sscanf(line.c_str(), "Uid: %d", &uid);
-            break;
+void readProcUid(std::string pid_str,Process& proc){
+        proc.uid = -1;
+        std::string status_path = "/proc/" + pid_str + "/status";
+        std::ifstream status_file(status_path);
+        std::string line;
+        
+        while (std::getline(status_file, line)) {
+            if (line.find("Uid:") == 0) {
+                // std::istringstream iss(line.substr(4));
+                // iss >> proc.uid;
+                sscanf(line.c_str(), "Uid: %d", &proc.uid);
+                break;
+            }
         }
-    }
-    return uid;
 }
+
 
 void readProcMem(std::string pid_str, Process& proc){
     std::string status_path = "/proc/" + pid_str + "/status";
@@ -168,22 +167,21 @@ void readProcMem(std::string pid_str, Process& proc){
 }
 
 void readTotMem(){
-    std::ifstream meminfo("/proc/meminfo");
+    std::ifstream meminfo("/proc/meminfo"); // mem info in kb
     std::string line;
     
     while (std::getline(meminfo, line)) {
         if (line.find("MemAvailable:") == 0) {
             sscanf(line.c_str(), "MemAvailable: %lu kB", &my_system.available_mem);
-            my_system.used_mem_gb = (double)(my_system.total_mem - my_system.available_mem) / (1024.0 * 1024.0); 
-            if(my_system.total_mem) {
-                my_system.used_mem_percent = 100.0 * (1.0 - (double)my_system.available_mem / my_system.total_mem);
-            }
+            my_system.used_mem_gb = (double) (my_system.total_mem - my_system.available_mem) / (1024.0*1024.0); 
+            if(my_system.total_mem) my_system.used_mem_percent = 100.0 * (1.0  -(double) my_system.available_mem / (my_system.total_mem));
         }
     }
+    
 }
-
 void readSystemInfo() {
-    my_system.page_size = sysconf(_SC_PAGESIZE);
+    my_system.page_size = (double) sysconf(_SC_PAGESIZE);
+    // Read total memory
     std::ifstream meminfo("/proc/meminfo");
     std::string line;
     
@@ -204,72 +202,47 @@ void readSystemInfo() {
     
     std::ifstream login_defs("/etc/login.defs");
     while (std::getline(login_defs, line)) {
+        // Skip comments and empty lines
         if (line.empty() || line[0] == '#') continue;
+        
+        // Remove leading whitespace for easier parsing
         line.erase(0, line.find_first_not_of(" \t"));
         
+        // Parse UID and GID ranges [citation:3][citation:8]
         if (line.find("UID_MIN") == 0) {
             sscanf(line.c_str(), "UID_MIN %lu", &my_system.uid_min);
         } else if (line.find("UID_MAX") == 0) {
             sscanf(line.c_str(), "UID_MAX %lu", &my_system.uid_max);
         }
     }
+   
 }
-
-void assignGroupName(uid_t uid,const Process& proc, std::string& group_name){
-    if(uid < my_system.uid_min || uid > my_system.uid_max){
-        group_name = "system_processes";
-    } else {
-        group_name = proc.cmd;
-    }
-}
-
-
-void formGroups(const std::unordered_map<pid_t, Process>& processes, 
-                std::unordered_map<std::string, ProcessGroup>& groups) {
-    groups.clear();
-    
-    for (const auto& proc_pair : processes) {
-        const Process& proc = proc_pair.second; 
-        std::string group_name;
-        assignGroupName(proc.uid, proc, group_name);
-        
-        ProcessGroup& group = groups[group_name];
-        group.group_name = group_name;
-        group.count++;
-        group.total_mem_kb += proc.mem_kb;
-        group.tot_mem_gb += proc.mem_kb/(1024.0 * 1024.0);
-        group.cpu_percent += proc.cpu_percent;
-    }
-}
-
-
-void scanProcesses(std::unordered_map<pid_t, Process>& processes) {
+ 
+void scanProcesses(std::unordered_map<pid_t,Process>& processes) {
+    // processes.clear();
     std::set<pid_t> current_pids;
-    
     for (const auto& entry : fs::directory_iterator("/proc")) {
         if (!entry.is_directory()) continue;
         
         std::string pid_str = entry.path().filename();
         pid_t curr_pid = 0;
-        if(!readProcPid(pid_str, curr_pid)) continue;
-        
+        if(!readProcPid(pid_str ,curr_pid)) continue;
         current_pids.insert(curr_pid);
-        
+
         auto it = processes.find(curr_pid);
         if (it == processes.end()) {
-            // New process
+            // New process - insert and initialize static fields
             Process new_proc;
             new_proc.pid = curr_pid;
-            new_proc.uid = readProcUid(pid_str);
-            readProcCmd(pid_str, new_proc.cmd);
+            readProcCmd(pid_str, new_proc);
+            readProcUid(pid_str, new_proc);
             it = processes.insert({curr_pid, new_proc}).first;
         }
-        
         Process& curr_proc = it->second;
         readProcMem(pid_str, curr_proc);
         readProcCpuTimes(pid_str, curr_proc);
+
     }
-    
     // Remove dead processes
     for (auto it = processes.begin(); it != processes.end(); ) {
         if (current_pids.find(it->first) == current_pids.end()) {
@@ -280,76 +253,84 @@ void scanProcesses(std::unordered_map<pid_t, Process>& processes) {
     }
 }
 
+
 void displaySystemInfo(){
     std::cout << std::fixed << std::setprecision(2);
-    std::cout << "System Resources: RAM: " << my_system.tot_mem_gb << " GB | "
-          << my_system.core_number << " CPU cores\nRAM used:" 
-          << my_system.used_mem_percent << "% (" << my_system.used_mem_gb << " GB) used \n"
-          << "CPU: " << my_system.total_cpu_percent << "% used\n";
+    std::cout << "System Resources: "<<"RAM: " << my_system.tot_mem_gb << " GB | "
+          << my_system.core_number<<" CPU cores\nRAM used:" 
+          << my_system.used_mem_percent << "% ("<< my_system.used_mem_gb<<" GB) used \n"
+          << "CPU: " << my_system.total_cpu_percent << "%  used\n";
 }
 
-void displayProcGroups(const std::unordered_map<std::string, ProcessGroup>& groups) {
+void displayProcesses(const std::unordered_map<pid_t, Process>& processes_map) {
     std::cout << std::fixed << std::setprecision(2);
-    std::vector<const ProcessGroup*> sorted_groups;
-    for (const auto& [name, group] : groups) {
-        sorted_groups.push_back(&group);
+    std::cout << "Found " << processes_map.size() << " processes\n\n";
+    
+    // Convert map to vector for sorting
+    std::vector<const Process*> sorted_processes;
+    for (const auto& [pid, proc] : processes_map) {
+        sorted_processes.push_back(&proc);
     }
     
-    std::sort(sorted_groups.begin(), sorted_groups.end(),
-              [](const ProcessGroup* a, const ProcessGroup* b) { 
-                  return (a->total_mem_kb + a->cpu_percent) >(b->total_mem_kb + b->cpu_percent); 
+    std::sort(sorted_processes.begin(), sorted_processes.end(), //highest Ram usage first
+              [](const Process* a, const Process* b) { 
+                  return a->mem_kb > b->mem_kb; 
               });
-
+    
     std::cout << std::left 
-              << std::setw(20) << "GROUP" 
-              << std::setw(10) << "PROCESSES" 
-              << std::setw(12) << "RAM(GB)" 
+              << std::setw(8) << "PID" 
+              << std::setw(8) << "UID" 
+              << std::setw(10) << "RAM(GB)" 
               << std::setw(8) << "CPU%" 
-              << "\n";
+              << "COMMAND\n";
     
-    std::cout << std::string(50, '-') << "\n";
+    std::cout << std::string(45, '-') << "\n";
     
-    for (const auto* group : sorted_groups) {
-        if(group->cpu_percent+group->tot_mem_gb > 0.2)
+    int limit = (int)sorted_processes.size();// std::min(15, (int)sorted_processes.size());
+    for (int i = 0; i < limit; i++) {
+        const Process* p = sorted_processes[i];
         std::cout << std::left 
-                  << std::setw(20) << (group->group_name.length() > 19 ? group->group_name.substr(0, 19) : group->group_name)
-                  << std::setw(10) << group->count 
-                  << std::setw(12) << group->tot_mem_gb
-                  << std::setw(8) << group->cpu_percent 
-                  << "\n";
+                  << std::setw(8) << p->pid 
+                  << std::setw(8) << p->uid 
+                  << std::setw(10) << (((double) p->mem_kb) / (1024.0 * 1024.0)) 
+                  << std::setw(8) << p->cpu_percent 
+                  << p->cmd << "\n";
+        // std::cout << "DEBUG: PID " << p->pid << " mem_kb=" << p->mem_kb 
+        //   << " calculated_GB=" << (((double) p->mem_kb) / (1024.0*1024.0)) << "\n";
+        //debug
+        // debug_used_mem_gb += (((double) p->mem_kb) / (1024.0 * 1024.0));
+        // debug_total_cpu_percent += p->cpu_percent;
     }
+    // std::cout << " debug_used_mem_gb = "<<debug_used_mem_gb << "    from proc = "<<my_system.used_mem_gb<<std::endl;
+    // std::cout << " debug_total_cpu_percent = "<<debug_total_cpu_percent << "    from proc = "<<my_system.total_cpu_percent<<std::endl;
+
+    
+    if (processes_map.size() > limit) {
+        std::cout << "... and " << (processes_map.size() - limit) << " more processes\n";
+    }
+}
+void displayMain(const std::unordered_map<pid_t, Process>& processes_map) {
+    
+    std::cout << "\033[2J\033[1;1H";  // clear screen
+    
+    displaySystemInfo();
+    std::cout << "\n";  // Add spacing
+    displayProcesses(processes_map);
 }
 
-void displayMain(const std::unordered_map<std::string, ProcessGroup>& groups) {
-    system("clear");
-    displaySystemInfo();
-    std::cout << "\n";
-    displayProcGroups(groups);
-}
-void signalHandler(int signal) {
-    if (signal == SIGINT) {
-        keep_running = false;
-    }
-}
+
+
 int main(){
-    std::unordered_map<pid_t, Process> processes;  
-    std::unordered_map<std::string, ProcessGroup> groups;  
-    
+    std::unordered_map<pid_t, Process> processes;
     readSystemInfo();
-    std::cout << "Process Monitor Running... Press Ctrl+C to exit\n";
     
-    while (keep_running) {
-        readTotMem();
-        scanProcesses(processes);
-        calculateCpuPercentages(processes);
-        formGroups(processes, groups);
-        
-        displayMain(groups);
-        
-        // Wait before next update (adjust sleep time as needed)
-        sleep(1);  // Update every 2 seconds
-    }
-    
-    std::cout << "\nProcess Monitor stopped.\n";
+    readTotMem();
+    scanProcesses(processes);
+    calculateCpuPercentages(processes);
+    sleep(1);
+    readTotMem();
+    scanProcesses(processes);
+    calculateCpuPercentages(processes);
+    displayMain(processes);
     return 0;
 }
