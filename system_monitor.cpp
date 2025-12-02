@@ -76,51 +76,6 @@ struct SysInfo{
 SysInfo my_system;
 std::atomic<bool> keep_running{true};
 
-/*
-void readGpuProcesses(std::unordered_map<pid_t, Process>& processes) {
-    FILE* pipe = popen("nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader,nounits 2>/dev/null", "r");
-    if (!pipe) return;
-    
-    char buffer[1024];
-    for (auto& [pid, proc] : processes) {
-        proc.gpu_memory_mb = 0;
-    }
-    
-    while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
-        std::string line(buffer);
-        
-        if (!line.empty() && line.back() == '\n') {
-            line.pop_back();
-        }
-        
-        // Parse: "1234, 512" (PID, memory in MB)
-        size_t pos = line.find(',');
-        if (pos != std::string::npos) {
-            std::string pid_str = line.substr(0, pos);
-            std::string memory_str = line.substr(pos + 1);
-            
-            // Trim whitespace
-            pid_str.erase(0, pid_str.find_first_not_of(" \t"));
-            pid_str.erase(pid_str.find_last_not_of(" \t") + 1);
-            memory_str.erase(0, memory_str.find_first_not_of(" \t"));
-            memory_str.erase(memory_str.find_last_not_of(" \t") + 1);
-            
-            try {
-                pid_t pid = std::stoi(pid_str);
-                double gpu_memory = std::stod(memory_str);
-                auto it = processes.find(pid);
-                if (it != processes.end()) {
-                    it->second.gpu_memory_mb = gpu_memory;
-                }
-            } catch (...) {
-                // Skip invalid entries
-            }
-        }
-    }
-    pclose(pipe);
-}
-*/
-
 void readGpuProcesses(std::unordered_map<pid_t, Process>& processes) {
     // Use the main nvidia-smi output that shows all processes
     FILE* pipe = popen("nvidia-smi 2>/dev/null", "r");
